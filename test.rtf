@@ -1,0 +1,137 @@
+{\rtf1\ansi\ansicpg1252\cocoartf1348\cocoasubrtf170
+{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww10800\viewh8400\viewkind0
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural
+
+\f0\fs24 \cf0 /*\
+\
+water_HighBaseloadDetection(1e2b4231-2aa8a7e3,2016-09-14,hisDates: 1wk, overHeadPercentage: 10%,timeLimit:2hr, minLoadThld: 0.001 )\
+\
+*/\
+\
+(waterMeter, dates ,hisDates: 1mo, overHeadPercentage: 10%,timeLimit:1hr, minLoadThld: 1 ) => do\
+\
+// *************** rule parameter reading step **************\
+\
+ bldgRuleTuning: read(equip and ruleParameter and siteRef == waterMeter->siteRef,false)\
+  if (bldgRuleTuning != null and bldgRuleTuning["water_HighBaseloadDetection_hisDates"] != null )           hisDates = bldgRuleTuning-> water_HighBaseloadDetection_hisDates\
+  if (bldgRuleTuning != null and bldgRuleTuning["water_HighBaseloadDetection_overHeadPercentage"] != null ) overHeadPercentage = bldgRuleTuning-> water_HighBaseloadDetection_overHeadPercentage\
+  if (bldgRuleTuning != null and bldgRuleTuning["water_HighBaseloadDetection_timeLimit"] != null )          timeLimit = bldgRuleTuning-> water_HighBaseloadDetection_timeLimit\
+  if (bldgRuleTuning != null and bldgRuleTuning["water_HighBaseloadDetection_minLoadThld"] != null )        minLoadThld = bldgRuleTuning-> water_HighBaseloadDetection_minLoadThld\
+\
+  if (readById(waterMeter->id).has("water_HighBaseloadDetection_hisDates") )           hisDates = readById(waterMeter->id)["water_HighBaseloadDetection_hisDates"]\
+  if (readById(waterMeter->id).has("water_HighBaseloadDetection_overHeadPercentage") ) overHeadPercentage = readById(waterMeter->id)["water_HighBaseloadDetection_overHeadPercentage"]\
+  if (readById(waterMeter->id).has("water_HighBaseloadDetection_timeLimit") )          timeLimit = readById(waterMeter->id)["water_HighBaseloadDetection_timeLimit"]\
+  if (readById(waterMeter->id).has("water_HighBaseloadDetection_minLoadThld") )        minLoadThld = readById(waterMeter->id)["water_HighBaseloadDetection_minLoadThld"]\
+\
+//********** point reading step ***********\
+\
+  // to seperate weekday and weekend values by adding a dayType check\
+  dayType: if (dates.isWeekday == true) true else false\
+  datesRange: if (dayType == false) dates-hisDates-31day .. dates-1day else dates-hisDates-1day .. dates-1day // if weekend for baseload it will add 4 more weekend by subtracting 31day\
+\
+  if (dates==today()) return null\
+\
+  waterPoint: readAll(water and sensor and not target and equipRef == waterMeter->id)\
+  if (waterPoint.size > 1) throw("more than 1 water reading detected")\
+  if (waterPoint.size == 0) throw("no water point defined")\
+\
+    if ( readById(waterPoint[0]->equipRef).has("siteMeter") == false) do\
+      if ( waterPoint[0].has("hisStart") == false ) throw ("check data sync on "+ waterPoint[0]->navName)\
+      if ( waterPoint[0]->hisStart.toStr().parseDate() >  dates-hisDates) return null //throw "calculation stopped as it reached end of hisStart for data" // to check if we have enough data to run analytics\
+      if ( waterPoint[0]->hisEnd.toStr().parseDate() <  dates) return null\
+    end\
+\
+  waterHis: waterPoint.hisRead(datesRange,\{limit:null\}).hisFindAll((val, ts) => ts.isWeekday(datesRange)==dayType).hisClip\
+  if (waterHis.size == 0) return null\
+//return waterHis\
+    // to get the true periods for intersection with hisWindows\
+    validPeriods:  waterPoint.hisRead(datesRange,\{limit:null\}).hisClip.map r=> \
+    \{\
+    ts:  r["ts"],\
+    value: if(r["ts"].isWeekday(datesRange)==dayType) true  else false\
+    \}\
+\
+  validPeriodsHis: validPeriods.hisFindPeriods(matchPointVal(_,true))\
+\
+  unocc: read(baseLoadHours).hisRead(dates).hisFindPeriods(matchPointVal(_,true))\
+\
+// baseline water calculation for history to be comapred against\
+  windows:  read(baseLoadHours).hisRead(datesRange,\{limit:null\}).hisClip.hisFindPeriods(matchPointVal(_,true))\
+\
+ hisWindows: hisPeriodIntersection([windows,validPeriodsHis]).findAll(x=>x["v0"]>=1)// to get baseload hours based on day type\
+\
+ if(hisWindows.size == 0 ) return null\
+\
+/*highBaseLoadPeriodsDaySum: hisMapSlices( waterPoint.hisRead(dates).hisClip , read(baseLoadHours).hisRead(dates).hisClip.hisFindPeriods(matchPointVal(_,true)) ) slice => do\
+   \{\
+    ts: slice.first["ts"],\
+    v0: slice.foldCol("v0", sum),\
+   \}\
+   end\
+\
+ highBaseLoadPeriodsSum: highBaseLoadPeriodsDaySum.hisRollup(sum,1day).foldCol("v0",avg).as(1) \
+\
+return highBaseLoadPeriodsDaySum\
+\
+ if( highBaseLoadPeriodsSum <= minLoadThld) return null*/\
+ \
+ \
+ avgUnoccHisValue: hisMapSlices( waterHis , hisWindows ) slice => do\
+   \{\
+    ts: slice.first["ts"],\
+    v0: slice.foldCol("v0", avg),\
+   \}\
+   end\
+\
+hisAvgWaterUnocc: avgUnoccHisValue.hisRollup(avg,1day).foldCol("v0",avg).as(1) \
+\
+\
+ highBaseLoadPeriodsDay: hisMapSlices( waterPoint.hisRead(dates).hisClip , read(baseLoadHours).hisRead(dates).hisClip.hisFindPeriods(matchPointVal(_,true)) ) slice => do\
+   \{\
+    ts: slice.first["ts"],\
+    v0: slice.foldCol("v0", avg),\
+   \}\
+   end\
+\
+ highBaseLoadPeriods: highBaseLoadPeriodsDay.hisRollup(avg,1day).foldCol("v0",avg).as(1) \
+\
+ if (highBaseLoadPeriods <= hisAvgWaterUnocc*(1+(overHeadPercentage.to(1)/100))) return null\
+\
+\
+highBaseLoad: hisMapSlices( waterPoint.hisRead(dates).hisClip , read(baseLoadHours).hisRead(dates).hisClip.hisFindPeriods(matchPointVal(_,true)) ) slice => do\
+   \{\
+    ts: slice.first["ts"],\
+    v0: slice.foldCol("v0", avg),\
+   \}\
+   end\
+\
+\
+highPeriods: highBaseLoad.hisFindPeriods(matchPointVal(_, v => v >= hisAvgWaterUnocc*(1+(overHeadPercentage.to(1)/100))))\
+\
+  ahList: []\
+    readAll(afterHour and siteRef == waterMeter -> siteRef -> id).each pt => do     // POG: PHG, how do we know the ah is for that specific point ? it is reading the site level point isnt it ? gen_OutOfHoursOperation_pouya(1da62cb9-2b5d8d5d,2016-02-05)\
+      if(pt.hisRead(dates).size !=0) do \
+\
+      periods: pt.hisRead(dates).hisFindPeriods(v => v == false)\
+\
+      ahList = ahList.add(periods)\
+      end\
+      \
+    end\
+\
+  notAh: hisPeriodIntersection(ahList)//.hisFindPeriods(matchPointVal(_,true))\
+//return notAh\
+\
+//********* data validation step ***********\
+\
+  primaryDataValidationWater: primaryDataValidation_pouya(waterPoint[0],dates) \
+      if(primaryDataValidationWater == false) return null \
+      \
+//********** condition check step **********\
+\
+      return hisPeriodIntersection([primaryDataValidationWater,highPeriods,unocc,if(notAh.size!=0)notAh]).hisFindAll(p => p >= timeLimit) // POG: get the notAh back as the hisGrid \
+\
+end\
+}
